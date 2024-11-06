@@ -164,7 +164,7 @@ launch_core_process() {
 # 检查服务权限
 check_service_permissions() {
     # 检查运行用户
-    if [ "$(id -u)" -ne 0 ]; then
+    if [ "$(id -u)" -ne 0; then
         log Error "需要root权限"
         return 1
     fi
