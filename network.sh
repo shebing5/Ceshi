@@ -212,14 +212,3 @@ check_network_status() {
     
     return $status
 }
-
-# 导出函数
-export -f manage_iptables_rules
-export -f setup_tproxy
-export -f setup_dns
-export -f setup_fakeip
-export -f setup_ipv6
-export -f network_recovery
-export -f init_network
-export -f cleanup_rules
-export -f check_network_status

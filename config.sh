@@ -30,8 +30,8 @@ validate_config() {
     local error_count=0
     
     # 验证必要路径
-    [ -d "$box_path" ] || { log Error "Box路径不存在: $box_path"; ((error_count++)); }
-    [ -d "$run_path" ] || mkdir -p "$run_path"
+    [[ -d "$box_path" ]] || { log Error "Box路径不存在: $box_path"; ((error_count++)); }
+    [[ -d "$run_path" ]] || mkdir -p "$run_path"
     
     # 验证用户组设置
     if ! id -g ${box_user_group#*:} >/dev/null 2>&1; then
