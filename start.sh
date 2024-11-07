@@ -985,13 +985,12 @@ detect_network_interfaces() {
   log Info "当前活动网络接口: $active_interface ($network_mode)"
 }
 
-# 修改 setup_qos 函数，添加错误检查
 setup_qos() {
   # 检查 tc 命令是否可用
   if ! command -v tc >/dev/null 2>&1; then
     log Warn "tc 命令不可用，跳过 QoS 设置"
     return 1
-  }
+  fi
 
   # 清理现有 QoS 规则
   tc qdisc del dev "$active_interface" root 2>/dev/null
@@ -1000,12 +999,12 @@ setup_qos() {
   if ! tc qdisc add dev "$active_interface" root handle 1: htb default 10 2>/dev/null; then
     log Warn "无法添加 QoS 根规则，跳过 QoS 设置"
     return 1
-  }
+  fi
 
   if ! tc class add dev "$active_interface" parent 1: classid 1:1 htb rate 100mbit 2>/dev/null; then
     log Warn "无法添加 QoS 基础类，跳过剩余 QoS 设置"
     return 1
-  }
+  fi
 
   # 添加优先级类，忽略错误
   tc class add dev "$active_interface" parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit prio 1 2>/dev/null
@@ -1016,22 +1015,21 @@ setup_qos() {
   return 0
 }
 
-# 修改 setup_ipset 函数，添加错误检查
 setup_ipset() {
   # 检查 ipset 命令是否可用
   if ! command -v ipset >/dev/null 2>&1; then
     log Warn "ipset 命令不可用，跳过 ipset 规则设置"
     return 1
-  }
+  fi
 
   # 尝试删除已存在的 ipset
   ipset destroy "$ipset_rules" 2>/dev/null
 
   # 创建新的 ipset
   if ! ipset create "$ipset_rules" hash:net family inet hashsize 1024 maxelem 65536 2>/dev/null; then
-    log Warn "无法创建 ipset，跳过 ipset 规则设���"
+    log Warn "无法创建 ipset，跳过 ipset 规则设置"
     return 1
-  }
+  fi
 
   # 添加规则，忽略错误
   for subnet in "${intranet[@]}"; do
