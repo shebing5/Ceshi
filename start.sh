@@ -58,6 +58,9 @@ active_interface=""
 network_mode="" # wifi/mobile/ethernet
 ipset_rules="box_rules"
 
+# 启用 QUIC 支持的标志
+enable_quic=true
+
 # 日志函数
 log() {
   export TZ=Asia/Shanghai
@@ -158,6 +161,11 @@ start_bin() {
           echo "$nodes" > ${clash_path}/proxy_providers/subscribe.yaml
         fi
         sed -i 's#url: ".*"#url: "'"${subscribe}"'"#' ${clash_path}/config.yaml
+      fi
+      # 如果启用 QUIC
+      if [ "$enable_quic" = true ]; then
+        export GOMAXPROCS=$(nproc)
+        export CLASH_EXPERIMENT_QUIC=true  # 启用 QUIC 支持的环境变量
       fi
       if ${bin_path} -t -d ${box_path}/${bin_name} > ${run_path}/check.log 2>&1 ; then
         log Info "正在启动 ${bin_name} 服务。"
@@ -879,167 +887,6 @@ clean_conntrack() {
   fi
 }
 
-# 新增：优化网络设置函数
-optimize_network() {
-  # 增加最大打开文件数
-  ulimit -n 1000000
-
-  # 优化 TCP 参数
-  sudo sysctl -w net.ipv4.tcp_fastopen=3
-  sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
-  sudo sysctl -w net.ipv4.tcp_no_metrics_save=1
-  sudo sysctl -w net.ipv4.tcp_fin_timeout=15
-  sudo sysctl -w net.ipv4.tcp_max_tw_buckets=5000
-  sudo sysctl -w net.ipv4.tcp_syncookies=1
-  sudo sysctl -w net.ipv4.tcp_rfc1337=1
-  sudo sysctl -w net.ipv4.tcp_keepalive_time=600
-  sudo sysctl -w net.ipv4.tcp_keepalive_probes=5
-  sudo sysctl -w net.ipv4.tcp_keepalive_intvl=15
-
-  # 优化内核参数
-  sudo sysctl -w net.core.rmem_max=26214400
-  sudo sysctl -w net.core.wmem_max=26214400
-  sudo sysctl -w net.core.rmem_default=1048576
-  sudo sysctl -w net.core.wmem_default=1048576
-  sudo sysctl -w net.core.optmem_max=65536
-  sudo sysctl -w net.core.somaxconn=8192
-  sudo sysctl -w net.core.netdev_max_backlog=8192
-
-  # 优化 IPv4 参数
-  sudo sysctl -w net.ipv4.tcp_rmem='4096 87380 67108864'
-  sudo sysctl -w net.ipv4.tcp_wmem='4096 65536 67108864'
-  sudo sysctl -w net.ipv4.udp_rmem_min=8192
-  sudo sysctl -w net.ipv4.udp_wmem_min=8192
-  sudo sysctl -w net.ipv4.tcp_mtu_probing=1
-
-  # Clash 特定优化
-  sudo sysctl -w net.ipv4.ip_forward=1
-  sudo sysctl -w net.ipv4.tcp_max_syn_backlog=8192
-  sudo sysctl -w net.ipv4.tcp_synack_retries=2
-  sudo sysctl -w net.ipv4.tcp_syn_retries=2
-
-  # 优化网络接口队列长度
-  for i in $(ls /sys/class/net); do
-    [ -e /sys/class/net/$i/tx_queue_len ] && echo 10000 > /sys/class/net/$i/tx_queue_len
-  done
-
-  # 增加新的优化功能
-  detect_network_interfaces
-  optimize_network_params
-  setup_qos
-  setup_ipset
-  
-  # 设置连接跟踪参数
-  sysctl -w net.netfilter.nf_conntrack_max=131072
-  sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=7200
-  sysctl -w net.netfilter.nf_conntrack_udp_timeout=60
-  
-  # 尝试启用 BBR，但不影响主要功能
-  if grep -q "tcp_bbr" "/proc/modules" 2>/dev/null; then
-    sysctl -w net.core.default_qdisc=fq 2>/dev/null
-    sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null
-    log Info "BBR 已启用"
-  else
-    log Warn "BBR 不可用，使用默认拥塞控制"
-  fi
-  
-  log Info "网络优化设置完成，当前模式: $network_mode"
-}
-
-# 新增：根据内核版本应用特定设置
-apply_kernel_specific_settings() {
-  kernel_version=$(uname -r)
-  if [[ "$kernel_version" == 4.* ]]; then
-    log Info "应用内核版本 4.x 特定设置。"
-    # 在此处添加内核版本 4.x 的特定设置
-  elif [[ "$kernel_version" == 5.* ]]; then
-    log Info "应用内核版本 5.x 特定设置。"
-    # 在此处添加内核版本 5.x 的特定设置
-  else
-    log Warn "未识别的内核版本，应用通用设置。"
-    # 在此处添加通用设置
-  fi
-}
-
-# 新增：检测和配置网络接口
-detect_network_interfaces() {
-  # 获取所有活动网络接口
-  network_interfaces=($(ip link show up | grep -v "lo" | awk -F: '{print $2}' | tr -d ' '))
-  
-  for interface in "${network_interfaces[@]}"; do
-    if echo "$interface" | grep -q "wlan"; then
-      network_mode="wifi"
-      active_interface="$interface"
-      break
-    elif echo "$interface" | grep -q "eth"; then
-      network_mode="ethernet"
-      active_interface="$interface"
-      break
-    elif echo "$interface" | grep -q "rmnet"; then
-      network_mode="mobile"
-      active_interface="$interface"
-      break
-    fi
-  done
-  
-  log Info "当前活动网络接口: $active_interface ($network_mode)"
-}
-
-setup_qos() {
-  # 检查 tc 命令是否可用
-  if ! command -v tc >/dev/null 2>&1; then
-    log Warn "tc 命令不可用，跳过 QoS 设置"
-    return 1
-  fi
-
-  # 清理现有 QoS 规则
-  tc qdisc del dev "$active_interface" root 2>/dev/null
-
-  # 添加新的 QoS 规则，带错误检查
-  if ! tc qdisc add dev "$active_interface" root handle 1: htb default 10 2>/dev/null; then
-    log Warn "无法添加 QoS 根规则，跳过 QoS 设置"
-    return 1
-  fi
-
-  if ! tc class add dev "$active_interface" parent 1: classid 1:1 htb rate 100mbit 2>/dev/null; then
-    log Warn "无法添加 QoS 基础类，跳过剩余 QoS 设置"
-    return 1
-  fi
-
-  # 添加优先级类，忽略错误
-  tc class add dev "$active_interface" parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit prio 1 2>/dev/null
-  tc class add dev "$active_interface" parent 1:1 classid 1:20 htb rate 30mbit ceil 50mbit prio 2 2>/dev/null
-  tc class add dev "$active_interface" parent 1:1 classid 1:30 htb rate 20mbit ceil 30mbit prio 3 2>/dev/null
-
-  log Info "QoS 设置完成"
-  return 0
-}
-
-setup_ipset() {
-  # 检查 ipset 命令是否可用
-  if ! command -v ipset >/dev/null 2>&1; then
-    log Warn "ipset 命令不可用，跳过 ipset 规则设置"
-    return 1
-  fi
-
-  # 尝试删除已存在的 ipset
-  ipset destroy "$ipset_rules" 2>/dev/null
-
-  # 创建新的 ipset
-  if ! ipset create "$ipset_rules" hash:net family inet hashsize 1024 maxelem 65536 2>/dev/null; then
-    log Warn "无法创建 ipset，跳过 ipset 规则设置"
-    return 1
-  fi
-
-  # 添加规则，忽略错误
-  for subnet in "${intranet[@]}"; do
-    ipset add "$ipset_rules" "$subnet" 2>/dev/null
-  done
-
-  log Info "ipset 规则设置完成"
-  return 0
-}
-
 # 修改 optimize_network 函数，改进错误处理
 optimize_network() {
   # 增加最大打开文件数
@@ -1110,8 +957,115 @@ optimize_network() {
     log Warn "BBR 不可用，使用默认拥塞控制"
   fi
   
+  # 优化网络参数以支持 QUIC 协议
+  sudo sysctl -w net.core.rmem_max=2500000 >/dev/null 2>&1
+  sudo sysctl -w net.core.wmem_max=2500000 >/dev/null 2>&1
+  sudo sysctl -w net.ipv4.udp_mem='65536 131072 262144' >/dev/null 2>&1
+  sudo sysctl -w net.ipv4.udp_rmem_min=16384 >/dev/null 2>&1
+  sudo sysctl -w net.ipv4.udp_wmem_min=16384 >/dev/null 2>&1
+
+  # 启用 BBR 拥塞控制算法
+  sudo sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+  sudo sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+
   log Info "网络优化设置完成，当前模式: $network_mode"
 }
+
+
+# 新增：根据内核版本应用特定设置
+apply_kernel_specific_settings() {
+  kernel_version=$(uname -r)
+  if [[ "$kernel_version" == 4.* ]]; then
+    log Info "应用内核版本 4.x 特定设置。"
+    # 在此处添加内核版本 4.x 的特定设置
+  elif [[ "$kernel_version" == 5.* ]]; then
+    log Info "应用内核版本 5.x 特定设置。"
+    # 在此处添加内核版本 5.x 的特定设置
+  else
+    log Warn "未识别的内核版本，应用通用设置。"
+    # 在此处添加通用设置
+  fi
+}
+
+# 新增：检测和配置网络接口
+detect_network_interfaces() {
+  # 获取所有活动网络接口
+  network_interfaces=($(ip link show up | grep -v "lo" | awk -F: '{print $2}' | tr -d ' '))
+  
+  for interface in "${network_interfaces[@]}"; do
+    if echo "$interface" | grep -q "wlan"; then
+      network_mode="wifi"
+      active_interface="$interface"
+      break
+    elif echo "$interface" | grep -q "eth"; then
+      network_mode="ethernet"
+      active_interface="$interface"
+      break
+    elif echo "$interface" | grep -q "rmnet"; then
+      network_mode="mobile"
+      active_interface="$interface"
+      break
+    fi
+  done
+  
+  log Info "当前活动网络接口: $active_interface ($network_mode)"
+}
+
+setup_qos() {
+  # 检查 tc 命令是否可用
+  if ! command -v tc >/dev/null 2>&1; then
+    log Warn "tc 命令不可用，跳过 QoS 设置"
+    return 1
+  fi
+
+  # 清理现有 QoS 规则
+  tc qdisc del dev "$active_interface" root 2>/dev/null
+
+  # 添加新的 QoS 规则，带错误检查
+  if ! tc qdisc add dev "$active_interface" root handle 1: htb default 10 2>/dev/null; then
+    log Warn "无法添加 QoS 根规则，跳过 QoS 设置"
+    return 1
+  fi
+
+  if ! tc class add dev "$active_interface" parent 1: classid 1:1 htb rate 1gbit burst 15k 2>/dev/null; then
+    log Warn "无法添加 QoS 基础类，跳过剩余 QoS 设置"
+    return 1
+  fi
+
+  # 添加优先级类，忽略错误
+  tc class add dev "$active_interface" parent 1:1 classid 1:10 htb rate 500mbit ceil 1gbit burst 15k prio 1 2>/dev/null
+  tc class add dev "$active_interface" parent 1:1 classid 1:20 htb rate 300mbit ceil 500mbit burst 15k prio 2 2>/dev/null
+  tc class add dev "$active_interface" parent 1:1 classid 1:30 htb rate 200mbit ceil 300mbit burst 15k prio 3 2>/dev/null
+
+  log Info "QoS 设置完成"
+  return 0
+}
+
+setup_ipset() {
+  # 检查 ipset 命令是否可用
+  if ! command -v ipset >/dev/null 2>&1; then
+    log Warn "ipset 命令不可用，跳过 ipset 规则设置"
+    return 1
+  fi
+
+  # 尝试删除已存在的 ipset
+  ipset destroy "$ipset_rules" 2>/dev/null
+
+  # 创建新的 ipset
+  if ! ipset create "$ipset_rules" hash:net family inet hashsize 1024 maxelem 65536 2>/dev/null; then
+    log Warn "无法创建 ipset，跳过 ipset 规则设置"
+    return 1
+  fi
+
+  # 添加规则，忽略错误
+  for subnet in "${intranet[@]}"; do
+    ipset add "$ipset_rules" "$subnet" 2>/dev/null
+  done
+
+  log Info "ipset 规则设置完成"
+  return 0
+}
+
 
 # 等待用户登录
 wait_until_login
